@@ -826,3 +826,73 @@ class TestLegacyLibraryContentBlockMigration(LegacyLibraryContentTest):
         assert '<li>html 2</li>' in rendered.content
         assert '<li>html 3</li>' in rendered.content
         assert '<li>html 4</li>' in rendered.content
+
+
+class TestLegacyLibraryContentBlockMigrationPublishing(LegacyLibraryContentTest):
+    """
+    Unit tests for the `publish_if_was_published` flag of
+    LegacyLibraryContentBlock.v2_update_children_upstream_version.
+    """
+
+    def setUp(self):
+        from cms.djangoapps.modulestore_migrator import api
+        from cms.djangoapps.modulestore_migrator.data import CompositionLevel, RepeatHandlingStrategy
+        super().setUp()
+        user = UserFactory()
+        self._sync_lc_block_from_library()
+        self.organization = OrganizationFactory(short_name="myorg")
+        lib_api.create_library(
+            org=self.organization,
+            slug="mylib",
+            title="My Test V2 Library",
+        )
+        self.library_v2 = lib_api.ContentLibrary.objects.get(slug="mylib")
+        api.start_migration_to_library(
+            user=user,
+            source_key=self.library.location.library_key,
+            target_library_key=self.library_v2.library_key,
+            target_collection_slug=None,
+            composition_level=CompositionLevel.Component,
+            repeat_handling_strategy=RepeatHandlingStrategy.Skip,
+            preserve_url_slugs=True,
+            forward_source_to_target=True,
+        )
+
+    def test_publishes_block_that_was_previously_published(self):
+        """
+        If the LC block was published before migration, and `publish_if_was_published=True`,
+        the migration should re-publish it so the new upstream links reach the published branch.
+        """
+        self.store.publish(self.course.location, self.user_id)
+
+        self.lc_block.v2_update_children_upstream_version(self.user_id, publish_if_was_published=True)
+
+        with self.store.branch_setting(ModuleStoreEnum.Branch.published_only):
+            published_block = self.store.get_item(self.lc_block.location)
+            assert published_block.is_migrated_to_v2 is True
+            assert published_block.get_children()[0].upstream == "lb:myorg:mylib:html:html_1"
+
+    def test_does_not_publish_when_flag_is_false(self):
+        """
+        Even if the block was published before migration, it should NOT be re-published
+        when `publish_if_was_published` is False (the default).
+        """
+        self.store.publish(self.course.location, self.user_id)
+
+        self.lc_block.v2_update_children_upstream_version(self.user_id)
+
+        with self.store.branch_setting(ModuleStoreEnum.Branch.published_only):
+            published_block = self.store.get_item(self.lc_block.location)
+            # The published version still reflects the pre-migration state.
+            assert published_block.is_migrated_to_v2 is False
+
+    def test_does_not_publish_block_that_was_never_published(self):
+        """
+        If the LC block was never published, `publish_if_was_published=True` should not
+        cause it to become published.
+        """
+        assert not self.store.has_published_version(self.lc_block)
+
+        self.lc_block.v2_update_children_upstream_version(self.user_id, publish_if_was_published=True)
+
+        assert not self.store.has_published_version(self.store.get_item(self.lc_block.location))
